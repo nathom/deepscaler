@@ -15,8 +15,10 @@
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
 
-from verl import DataProto
+import ray
+import hydra
 import torch
+from verl import DataProto
 from verl.utils.reward_score import gsm8k, math
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 
@@ -52,7 +54,9 @@ class RewardManager():
         if config and 'tools' in config and config.tools.enabled:
             try:
                 from deepscaler.rewards.tool_utils import (
-                    ToolRegistry, Tool, SearchTool, parse_tool_calls, insert_tool_responses
+                    ToolRegistry, Tool, SearchTool, WikipediaTitleSearchTool,
+                    WikipediaContentSearchTool, WikipediaSectionSearchTool,
+                    parse_tool_calls, insert_tool_responses
                 )
                 import importlib
                 import json
@@ -80,6 +84,13 @@ class RewardManager():
                     
                     search_tool = SearchTool(knowledge_base=knowledge_base)
                     self.tool_registry.register_tool(search_tool)
+                
+                # Store the tool registry in config for vLLM to access
+                if hasattr(config, 'actor_rollout_ref'):
+                    # Add tool registry to actor_rollout_ref model config if it exists
+                    if not hasattr(config.actor_rollout_ref, 'model'):
+                        config.actor_rollout_ref.model = {}
+                    config.actor_rollout_ref.model.tool_registry = self.tool_registry
                 
                 # Check if the wikisearch.py file exists
                 wikisearch_path = os.path.expanduser("~/wikisearch/wikisearch.py")
@@ -148,7 +159,6 @@ class RewardManager():
         already_print_data_sources = {}
 
         from concurrent.futures import ThreadPoolExecutor
-        from typing import Dict, Any
         
         def process_item(args):
             i, data_item, already_print_data_sources = args
@@ -167,27 +177,30 @@ class RewardManager():
             sequences_str = self.tokenizer.decode(sequences)
             
             # Handle tool calls if enabled
-            if self.tools_available and '<tool' in sequences_str:
-                # Parse and execute tool calls
-                tool_calls = self.parse_tool_calls(sequences_str)
+            # With vLLM native tool calling, tool calls are processed during generation
+            # and the results are already in the sequences_str
+            if self.tools_available:
+                # Collect metrics on tool usage from the output text
+                tool_count = 0
+                success_count = 0
                 
-                # Execute each tool call and collect responses
-                tool_responses = []
-                for tool_call in tool_calls:
-                    response = self.tool_registry.execute_tool(tool_call)
-                    tool_responses.append(response)
-                
-                # Insert tool responses into the text
-                if tool_responses:
-                    sequences_str = self.insert_tool_responses(sequences_str, tool_responses)
+                # Check for function call pattern in vLLM output format
+                if "function" in sequences_str and "Result from" in sequences_str:
+                    import re
+                    # Count function calls (tools)
+                    tool_calls = re.findall(r'function\s*\(', sequences_str)
+                    tool_count = len(tool_calls)
+                    
+                    # Count successful tool call responses 
+                    success_responses = re.findall(r'Result from', sequences_str)
+                    success_count = len(success_responses)
                     
                     # Store tool usage metrics in non_tensor_batch for later analysis
-                    # This is informational only and not used in the current reward function
                     if 'tool_usage' not in data_item.non_tensor_batch:
                         data_item.non_tensor_batch['tool_usage'] = {}
                     
-                    data_item.non_tensor_batch['tool_usage']['num_calls'] = len(tool_calls)
-                    data_item.non_tensor_batch['tool_usage']['success_rate'] = sum(1 for r in tool_responses if r.success) / len(tool_responses) if tool_responses else 0
+                    data_item.non_tensor_batch['tool_usage']['num_calls'] = tool_count
+                    data_item.non_tensor_batch['tool_usage']['success_rate'] = success_count / tool_count if tool_count > 0 else 0
 
             ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
 
@@ -217,10 +230,6 @@ class RewardManager():
         return reward_tensor
 
 
-import ray
-import hydra
-
-
 @hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)
 def main(config):
     if not ray.is_initialized():
@@ -233,7 +242,6 @@ def main(config):
 @ray.remote
 def main_task(config):
     from verl.utils.fs import copy_local_path_from_hdfs
-    from transformers import AutoTokenizer
 
     # print initial config
     from pprint import pprint

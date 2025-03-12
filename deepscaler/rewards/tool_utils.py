@@ -61,6 +61,31 @@ The system will process your tool call and provide a response that you can use i
 Response content from the {self.name} tool
 ```
 """
+    
+    def to_parameters_schema(self) -> Dict[str, Any]:
+        """Return a JSON schema for the tool's parameters."""
+        # Default implementation - should be overridden by subclasses
+        return {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The query to process"
+                }
+            },
+            "required": ["query"]
+        }
+        
+    def to_vllm_format(self) -> Dict[str, Any]:
+        """Convert tool to vLLM tool specification format."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.to_parameters_schema()
+            }
+        }
 
 
 class SearchTool(Tool):
@@ -96,6 +121,19 @@ For example, if you want to find information about a mathematical concept:
 search(query="definition of eigenvalues")
 ```
 """
+
+    def to_parameters_schema(self) -> Dict[str, Any]:
+        """Return JSON schema for search tool parameters."""
+        return {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query to look up information about"
+                }
+            },
+            "required": ["query"]
+        }
 
     def execute(self, arguments: Dict[str, Any]) -> str:
         """Execute the search with the given query."""
@@ -145,6 +183,24 @@ For example, to find articles about a specific topic:
 search_wikipedia_titles(query="quantum physics")
 ```
 """
+
+    def to_parameters_schema(self) -> Dict[str, Any]:
+        """Return JSON schema for Wikipedia title search tool parameters."""
+        return {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query for Wikipedia article titles"
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return (default: 3)",
+                    "default": 3
+                }
+            },
+            "required": ["query"]
+        }
 
     def execute(self, arguments: Dict[str, Any]) -> str:
         """Execute the Wikipedia title search."""
@@ -212,6 +268,24 @@ For example, to find detailed information about a concept:
 search_wikipedia_content(query="quantum physics")
 ```
 """
+
+    def to_parameters_schema(self) -> Dict[str, Any]:
+        """Return JSON schema for Wikipedia content search tool parameters."""
+        return {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query for Wikipedia article content"
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return (default: 2)",
+                    "default": 2
+                }
+            },
+            "required": ["query"]
+        }
 
     def execute(self, arguments: Dict[str, Any]) -> str:
         """Execute the Wikipedia content search."""
@@ -301,6 +375,24 @@ search_wikipedia_sections(query="quantum physics")
 ```
 """
 
+    def to_parameters_schema(self) -> Dict[str, Any]:
+        """Return JSON schema for Wikipedia sections search tool parameters."""
+        return {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query for Wikipedia article sections"
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return (default: 2)",
+                    "default": 2
+                }
+            },
+            "required": ["query"]
+        }
+
     def execute(self, arguments: Dict[str, Any]) -> str:
         """Execute the Wikipedia section search."""
         query = arguments.get("query", "")
@@ -388,6 +480,22 @@ class ToolRegistry:
                 success=False,
                 error_message=str(e),
             )
+    
+    def get_vllm_tools(self) -> List[Dict[str, Any]]:
+        """Get all tools in vLLM format."""
+        return [tool.to_vllm_format() for tool in self.tools.values()]
+
+    def execute_vllm_tool_call(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+        """Execute a tool call from vLLM and return the response as string."""
+        if tool_name not in self.tools:
+            return f"Error: Tool '{tool_name}' not found."
+
+        try:
+            tool = self.tools[tool_name]
+            result = tool.execute(arguments)
+            return str(result)
+        except Exception as e:
+            return f"Error executing tool '{tool_name}': {str(e)}"
 
     def get_tool_descriptions(self) -> str:
         """Return a formatted string with all tool descriptions for prompts."""

@@ -124,6 +124,24 @@ class vLLMRollout(BaseRollout):
         for k in config.keys():
             if hasattr(SamplingParams(), str(k)):
                 kwargs[k] = config.get(k)
+        
+        # Add tool configuration if tools are enabled
+        if hasattr(config, 'tools') and config.tools.enabled and vllm_version == '0.6.3':
+            from deepscaler.rewards.tool_utils import ToolRegistry
+            
+            # First check if tool_registry is in model config
+            tool_registry = None
+            if hasattr(config, 'model') and hasattr(config.model, 'tool_registry'):
+                tool_registry = config.model.tool_registry
+            
+            # Try to get it from kwargs as fallback
+            if tool_registry is None:
+                tool_registry = kwargs.pop('tool_registry', None)
+                
+            if tool_registry and isinstance(tool_registry, ToolRegistry):
+                kwargs['tools'] = tool_registry.get_vllm_tools()
+                kwargs['tool_choice'] = 'auto'
+                print(f"Enabling tool calling with {len(kwargs['tools'])} tools")
 
         print(f"kwargs: {kwargs}")
         self.sampling_params = SamplingParams(**kwargs)
