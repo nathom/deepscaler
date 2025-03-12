@@ -25,10 +25,12 @@ class RewardType(Enum):
     Attributes:
         MATH (str): Represents a math-related problem type.
         CODE (str): Represents a coding-related problem type.
+        QA (str): Represents a factual question-answering problem type.
         UNK (str): Represents an unknown or unclassified problem type.
     """
     MATH = 'MATH'
     CODE = 'CODE'
+    QA = 'QA'
     UNK = 'UNK'
 
 
