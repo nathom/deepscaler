@@ -15,8 +15,10 @@
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
 
-from verl import DataProto
+import ray
+import hydra
 import torch
+from verl import DataProto
 from verl.utils.reward_score import gsm8k, math
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 
@@ -34,11 +36,116 @@ def _select_rm_score_fn(data_source):
 
 class RewardManager():
     """The reward manager.
+    
+    Handles reward computation for model responses, including:
+    1. Processing standard responses
+    2. Handling tool calls in responses
+    3. Tracking tool usage metrics
     """
 
-    def __init__(self, tokenizer, num_examine) -> None:
+    def __init__(self, tokenizer, num_examine, config=None) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
+        self.config = config
+        
+        # Initialize tools if enabled in config
+        self.tools_available = False
+        
+        if config and 'tools' in config and config.tools.enabled:
+            try:
+                from deepscaler.rewards.tool_utils import (
+                    ToolRegistry, Tool, SearchTool, WikipediaTitleSearchTool,
+                    WikipediaContentSearchTool, WikipediaSectionSearchTool,
+                    parse_tool_calls, insert_tool_responses
+                )
+                import importlib
+                import json
+                import os
+                from deepscaler.system_prompts import TOOL_ENABLED_SYSTEM_PROMPT, DEEPSEEK_MATH_SYSTEM_PROMPT
+                
+                # Setup tool registry
+                self.tool_registry = ToolRegistry()
+                self.tools_to_use = config.tools.tools_to_use
+                
+                # Register requested tools
+                if "search" in self.tools_to_use:
+                    knowledge_base = {}
+                    
+                    # Load knowledge base if specified
+                    if config.tools.knowledge_base_path:
+                        kb_path = os.path.expanduser(config.tools.knowledge_base_path)
+                        if os.path.exists(kb_path):
+                            try:
+                                with open(kb_path, 'r') as f:
+                                    knowledge_base = json.load(f)
+                                print(f"Loaded knowledge base from {kb_path} with {len(knowledge_base)} entries")
+                            except Exception as e:
+                                print(f"Error loading knowledge base: {e}")
+                    
+                    search_tool = SearchTool(knowledge_base=knowledge_base)
+                    self.tool_registry.register_tool(search_tool)
+                
+                # Store the tool registry in config for vLLM to access
+                if hasattr(config, 'actor_rollout_ref'):
+                    # Add tool registry to actor_rollout_ref model config if it exists
+                    if not hasattr(config.actor_rollout_ref, 'model'):
+                        config.actor_rollout_ref.model = {}
+                    config.actor_rollout_ref.model.tool_registry = self.tool_registry
+                
+                # Check if the wikisearch.py file exists
+                wikisearch_path = os.path.expanduser("~/wikisearch/wikisearch.py")
+                if not os.path.exists(wikisearch_path):
+                    print(f"Warning: Wikisearch file not found at {wikisearch_path}")
+                else:
+                    print(f"Wikisearch file found at {wikisearch_path}")
+                
+                # Register Wikipedia tools if requested
+                if "search_wikipedia_titles" in self.tools_to_use:
+                    wiki_title_tool = WikipediaTitleSearchTool()
+                    self.tool_registry.register_tool(wiki_title_tool)
+                    
+                if "search_wikipedia_content" in self.tools_to_use:
+                    wiki_content_tool = WikipediaContentSearchTool()
+                    self.tool_registry.register_tool(wiki_content_tool)
+                    
+                if "search_wikipedia_sections" in self.tools_to_use:
+                    wiki_section_tool = WikipediaSectionSearchTool()
+                    self.tool_registry.register_tool(wiki_section_tool)
+                
+                # For custom tools, import dynamically based on class name
+                for tool_name in self.tools_to_use:
+                    if tool_name != "search" and ":" in tool_name:
+                        module_path, class_name = tool_name.split(":")
+                        try:
+                            module = importlib.import_module(module_path)
+                            tool_class = getattr(module, class_name)
+                            if issubclass(tool_class, Tool):
+                                tool_instance = tool_class()
+                                self.tool_registry.register_tool(tool_instance)
+                                print(f"Registered custom tool: {tool_class.__name__}")
+                        except (ImportError, AttributeError) as e:
+                            print(f"Error loading custom tool {tool_name}: {e}")
+                
+                # Select system prompt
+                base_prompt = TOOL_ENABLED_SYSTEM_PROMPT
+                if config.tools.system_prompt == "math":
+                    base_prompt = DEEPSEEK_MATH_SYSTEM_PROMPT
+                
+                # Create tool-enabled system prompt
+                self.tool_system_prompt = self.tool_registry.get_system_prompt_with_tools(base_prompt)
+                
+                self.parse_tool_calls = parse_tool_calls
+                self.insert_tool_responses = insert_tool_responses
+                self.tools_available = True
+                
+                # Print startup message about tools
+                print("Tool utilities initialized successfully")
+                print(f"Available tools: {', '.join(self.tool_registry.tools.keys())}")
+            except ImportError as e:
+                print(f"Tool utilities not available, disabling tool use: {e}")
+                self.tools_available = False
+        else:
+            print("Tools disabled in config or config not provided")
 
     def __call__(self, data: DataProto):
         """We will expand this function gradually based on the available datasets"""
@@ -52,10 +159,6 @@ class RewardManager():
         already_print_data_sources = {}
 
         from concurrent.futures import ThreadPoolExecutor
-        from typing import Dict, Any
-        #import threading
-        # Thread-safe dict for tracking printed data sources
-        # print_lock = threading.Lock()
         
         def process_item(args):
             i, data_item, already_print_data_sources = args
@@ -72,6 +175,32 @@ class RewardManager():
             # decode
             sequences = torch.cat((valid_prompt_ids, valid_response_ids))
             sequences_str = self.tokenizer.decode(sequences)
+            
+            # Handle tool calls if enabled
+            # With vLLM native tool calling, tool calls are processed during generation
+            # and the results are already in the sequences_str
+            if self.tools_available:
+                # Collect metrics on tool usage from the output text
+                tool_count = 0
+                success_count = 0
+                
+                # Check for function call pattern in vLLM output format
+                if "function" in sequences_str and "Result from" in sequences_str:
+                    import re
+                    # Count function calls (tools)
+                    tool_calls = re.findall(r'function\s*\(', sequences_str)
+                    tool_count = len(tool_calls)
+                    
+                    # Count successful tool call responses 
+                    success_responses = re.findall(r'Result from', sequences_str)
+                    success_count = len(success_responses)
+                    
+                    # Store tool usage metrics in non_tensor_batch for later analysis
+                    if 'tool_usage' not in data_item.non_tensor_batch:
+                        data_item.non_tensor_batch['tool_usage'] = {}
+                    
+                    data_item.non_tensor_batch['tool_usage']['num_calls'] = tool_count
+                    data_item.non_tensor_batch['tool_usage']['success_rate'] = success_count / tool_count if tool_count > 0 else 0
 
             ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
 
@@ -80,13 +209,13 @@ class RewardManager():
             compute_score_fn = _select_rm_score_fn(data_source)
             score = compute_score_fn(solution_str=sequences_str, ground_truth=ground_truth)
             
-            # with print_lock:
-            #     if data_source not in already_print_data_sources:
-            #         already_print_data_sources[data_source] = 0
-
-            #     if already_print_data_sources[data_source] < self.num_examine:
-            #         already_print_data_sources[data_source] += 1
-            #         print(sequences_str)      
+            # For debug printing if needed
+            # if data_source not in already_print_data_sources:
+            #     already_print_data_sources[data_source] = 0
+            # if already_print_data_sources[data_source] < self.num_examine:
+            #     already_print_data_sources[data_source] += 1
+            #     print(sequences_str)
+                
             return i, score, valid_response_length
 
         # Process items in parallel using ThreadPoolExecutor
@@ -101,10 +230,6 @@ class RewardManager():
         return reward_tensor
 
 
-import ray
-import hydra
-
-
 @hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)
 def main(config):
     if not ray.is_initialized():
@@ -117,7 +242,6 @@ def main(config):
 @ray.remote
 def main_task(config):
     from verl.utils.fs import copy_local_path_from_hdfs
-    from transformers import AutoTokenizer
 
     # print initial config
     from pprint import pprint
@@ -182,10 +306,10 @@ def main_task(config):
         role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
         mapping[Role.RewardModel] = global_pool_id
 
-    reward_fn = RewardManager(tokenizer=tokenizer, num_examine=0)
+    reward_fn = RewardManager(tokenizer=tokenizer, num_examine=0, config=config)
 
     # Note that we always use function-based RM for validation
-    val_reward_fn = RewardManager(tokenizer=tokenizer, num_examine=1)
+    val_reward_fn = RewardManager(tokenizer=tokenizer, num_examine=1, config=config)
 
     resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 

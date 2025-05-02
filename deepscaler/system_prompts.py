@@ -2,6 +2,9 @@
 
 DEEPSEEK_MATH_SYSTEM_PROMPT = """Let's think step by step and output the final answer within \\boxed{}. """
 
+# Base system prompt for tool-enabled models
+TOOL_ENABLED_SYSTEM_PROMPT = """You are an AI assistant that can use tools to help solve problems. You have access to various tools that can assist you in finding information and solving complex tasks."""
+
 # For Math ORM to verify correctness of LLM's solution. We disable this by default, as it doesn't help much.
 ORM_PROMPT = """You are an expert in verifying if two math answers are the same.
 Your input is a problem and two answers, Answer 1 and Answer 2. You need to check if they are mathematically equivalent.

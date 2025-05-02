@@ -147,6 +147,13 @@ algorithm:
     type: fixed
     kl_coef: 0.001
 
+tools:
+  enabled: False # Enable tool use in the training pipeline
+  tools_to_use: ["search", "search_wikipedia_titles", "search_wikipedia_content", "search_wikipedia_sections"] # List of tool names to enable
+  knowledge_base_path: null # Path to knowledge base for search tool (JSON format)
+  wikipedia_index_dir: "~/wiki_data/index" # Path to Wikipedia search index directory
+  system_prompt: "tool_enabled" # Which system prompt to use (base or tool_enabled)
+
 trainer:
   rejection_sample: False # Reject sample prompts that all succeed or all fail (0 signal for GRPO due to normalization).
   rejection_sample_multiplier: 2 # Multiple the training batch size by this factor to account for rejection sampling reduction.

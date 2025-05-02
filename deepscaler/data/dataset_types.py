@@ -20,6 +20,7 @@ class TrainDataset(enum.Enum):
     MATH = 'MATH'  # Dan Hendrycks Math Problems
     STILL = 'STILL'  # STILL dataset
     DEEPSCALER = 'DEEPSCALER'  # DeepScaler (AIME, AMC, OMNI_MATH, MATH, STILL)
+    SIMPLEQA = 'SIMPLEQA'  # SimpleQA factual question-answering dataset
 
 
 class TestDataset(enum.Enum):
@@ -32,6 +33,7 @@ class TestDataset(enum.Enum):
     MATH = 'MATH'  # Math 500 problems
     MINERVA = 'MINERVA'  # Minerva dataset
     OLYMPIAD_BENCH = 'OLYMPIAD_BENCH'  # Olympiad benchmark problems
+    SIMPLEQA = 'SIMPLEQA'  # SimpleQA factual question-answering dataset
 
 """Type alias for either training or testing dataset types."""
 Dataset = Union[TrainDataset, TestDataset]

@@ -26,8 +26,11 @@ fi
 # Train over a single node, 8 A100-80GB GPUs.
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    data.train_files=$HOME/deepscaler/data/train.parquet \
-    data.val_files=$HOME/deepscaler/data/aime.parquet \
+    tools.enabled=True \
+    tools.tools_to_use=[search_wikipedia_titles,search_wikipedia_content,search_wikipedia_sections] \
+    tools.system_prompt=tool_enabled \
+    data.train_files=./deepscaler/data/simpleqa_train.parquet \
+    data.val_files=./deepscaler/data/simpleqa_test.parquet \
     data.train_batch_size=128 \
     data.val_batch_size=512 \
     data.max_prompt_length=1024 \
